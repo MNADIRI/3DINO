@@ -12,3 +12,4 @@ cufile.log
 *.swp
 
 .vscode/
+.gradio/
