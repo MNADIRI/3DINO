@@ -164,7 +164,13 @@ def on_controls_change(show_overlay, colormap, alpha, head, img_gray, attn_maps)
 # ---------------------------------------------------------------------------
 COLORMAPS = ["jet", "hot", "inferno", "viridis", "plasma", "magma", "turbo"]
 
-with gr.Blocks() as demo:
+with gr.Blocks(
+    theme=gr.themes.Monochrome(),
+    css="""
+        .main-viewer img { image-rendering: pixelated; }
+        footer { display: none !important; }
+    """,
+) as demo:
 
     # ---- State (invisible, persists across callbacks) ----
     state_img_gray = gr.State(None)
@@ -266,9 +272,4 @@ if __name__ == "__main__":
         server_port=_args.port,
         share=False,  # set True to get a public gradio.live link
         show_error=True,
-        theme=gr.themes.Monochrome(),
-        css="""
-            .main-viewer img { image-rendering: pixelated; }
-            footer { display: none !important; }
-        """,
     )
