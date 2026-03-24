@@ -264,6 +264,7 @@ if __name__ == "__main__":
     demo.queue(default_concurrency_limit=1).launch(
         server_name="0.0.0.0",
         server_port=_args.port,
+        share=False,  # set True to get a public gradio.live link
         show_error=True,
         theme=gr.themes.Monochrome(),
         css="""
