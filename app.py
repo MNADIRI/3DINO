@@ -1,14 +1,20 @@
 """
-DINOv3 Attention Map Viewer — Local Web Interface
+DINO Attention Map Viewer — Local Web Interface
 
 Drag & drop a medical scan (PNG, JPG, NIfTI, DICOM), visualize it,
-and toggle the DINOv3 attention heatmap overlay on/off.
+and toggle the DINO attention heatmap overlay on/off.
 
 Launch:
-    python app.py
+    python app.py                                          # default: DINOv2-small (public)
+    python app.py --model facebook/dinov2-base             # DINOv2-base
+    python app.py --model facebook/dinov3-vits16-pretrain-lvd1689m  # DINOv3 (needs HF login)
 
 Then open http://localhost:7860 in your browser.
 """
+
+import argparse
+import os
+import sys
 
 import numpy as np
 import torch
@@ -22,9 +28,20 @@ from dinov3_attention_map import (
 )
 
 # ---------------------------------------------------------------------------
+# CLI args
+# ---------------------------------------------------------------------------
+_parser = argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--model", default="facebook/dinov2-small",
+                     help="HuggingFace model ID (default: facebook/dinov2-small)")
+_parser.add_argument("--port", type=int, default=7860)
+_args, _ = _parser.parse_known_args()
+
+MODEL_ID = _args.model
+
+# ---------------------------------------------------------------------------
 # Model loading (once at startup)
 # ---------------------------------------------------------------------------
-print("Loading DINOv3 model (auto-download ~85 MB on first run)...")
+print(f"Loading model: {MODEL_ID} (auto-download on first run)...")
 if torch.cuda.is_available():
     DEVICE = torch.device("cuda")
 elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -35,9 +52,10 @@ print(f"Device: {DEVICE}")
 
 from transformers import AutoModel  # noqa: E402
 
-MODEL = AutoModel.from_pretrained("facebook/dinov3-vits16-pretrain-lvd1689m")
+MODEL = AutoModel.from_pretrained(MODEL_ID)
 MODEL = MODEL.to(DEVICE).eval()
-print("Model ready.")
+PATCH_SIZE = getattr(MODEL.config, "patch_size", 14)
+print(f"Model ready. (patch_size={PATCH_SIZE})")
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +106,7 @@ def on_upload(file):
     img_gray = load_medical_image(path, slice_idx=mid_slice)
 
     # Run model
-    tensor = preprocess_for_dinov3(img_gray, DEVICE)
+    tensor = preprocess_for_dinov3(img_gray, DEVICE, patch_size=PATCH_SIZE)
     attn_maps = extract_attention_maps(MODEL, tensor)
     num_heads = int(attn_maps.shape[0])
 
@@ -117,7 +135,7 @@ def on_slice_change(
         return None, None, None
 
     img_gray = load_medical_image(file_path, slice_idx=int(slice_idx))
-    tensor = preprocess_for_dinov3(img_gray, DEVICE)
+    tensor = preprocess_for_dinov3(img_gray, DEVICE, patch_size=PATCH_SIZE)
     attn_maps = extract_attention_maps(MODEL, tensor)
 
     if show_overlay:
@@ -146,14 +164,7 @@ def on_controls_change(show_overlay, colormap, alpha, head, img_gray, attn_maps)
 # ---------------------------------------------------------------------------
 COLORMAPS = ["jet", "hot", "inferno", "viridis", "plasma", "magma", "turbo"]
 
-with gr.Blocks(
-    theme=gr.themes.Monochrome(),
-    title="DINOv3 Attention Viewer",
-    css="""
-        .main-viewer img { image-rendering: pixelated; }
-        footer { display: none !important; }
-    """,
-) as demo:
+with gr.Blocks() as demo:
 
     # ---- State (invisible, persists across callbacks) ----
     state_img_gray = gr.State(None)
@@ -162,8 +173,8 @@ with gr.Blocks(
 
     # ---- Header ----
     gr.Markdown(
-        "# DINOv3 — Attention Map Viewer\n"
-        "Drag & drop a medical scan, then toggle the attention overlay."
+        f"# DINO — Attention Map Viewer\n"
+        f"Model: `{MODEL_ID}` — Drag & drop a medical scan, then toggle the attention overlay."
     )
 
     with gr.Row():
@@ -196,7 +207,7 @@ with gr.Blocks(
             gr.Markdown(
                 "---\n"
                 "**Formats** : PNG · JPG · NIfTI (.nii.gz) · DICOM (.dcm)\n\n"
-                "**Model** : `dinov3-vits16` — auto-downloaded from HuggingFace\n\n"
+                f"**Model** : `{MODEL_ID}`\n\n"
                 f"**Device** : `{DEVICE}`"
             )
 
@@ -206,8 +217,6 @@ with gr.Blocks(
                 label="Viewer",
                 type="numpy",
                 height=620,
-                elem_classes=["main-viewer"],
-                show_download_button=True,
             )
 
     # ---- Event wiring ----
@@ -254,6 +263,11 @@ with gr.Blocks(
 if __name__ == "__main__":
     demo.queue(default_concurrency_limit=1).launch(
         server_name="0.0.0.0",
-        server_port=7860,
+        server_port=_args.port,
         show_error=True,
+        theme=gr.themes.Monochrome(),
+        css="""
+            .main-viewer img { image-rendering: pixelated; }
+            footer { display: none !important; }
+        """,
     )

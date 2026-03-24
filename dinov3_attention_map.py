@@ -74,14 +74,13 @@ def load_medical_image(image_path: str, slice_idx: int | None = None) -> np.ndar
     return img
 
 
-def preprocess_for_dinov3(img_gray: np.ndarray, device: torch.device) -> torch.Tensor:
-    """Preprocess a grayscale image for DINOv3. Returns tensor (1, 3, 518, 518)."""
-    # DINOv3 expects 518x518 (patch_size=14, 518/14=37 patches)
-    # But ViT-S/16 uses patch_size=16, so 224x224 -> 14x14 patches
-    img_size = 224
-    patch_size = 16
+def preprocess_for_dinov3(img_gray: np.ndarray, device: torch.device, patch_size: int = 14) -> torch.Tensor:
+    """Preprocess a grayscale image for DINO/DINOv2/DINOv3. Returns tensor (1, 3, H, W)."""
+    # Image size must be divisible by patch_size. Common sizes:
+    #   patch_size=14 (DINOv2) → 518 (37 patches) or 224 (16 patches)
+    #   patch_size=16 (DINOv3) → 224 (14 patches)
+    img_size = (patch_size * 16)  # 224 for ps=14, 256 for ps=16
 
-    # Make sure image size is divisible by patch_size
     img_pil = Image.fromarray(img_gray).resize((img_size, img_size), Image.LANCZOS)
     img_np = np.array(img_pil, dtype=np.float32) / 255.0
 
@@ -100,22 +99,56 @@ def preprocess_for_dinov3(img_gray: np.ndarray, device: torch.device) -> torch.T
 def extract_attention_maps(model, img_tensor: torch.Tensor) -> np.ndarray:
     """
     Extract CLS-to-patch attention from the last transformer block.
+    Works with DINOv2/DINOv3 HuggingFace models by hooking into the
+    self-attention layer and computing softmax(Q @ K^T / sqrt(d)).
     Returns: attention maps of shape (num_heads, h_patches, w_patches)
     """
-    # Register hook on the last attention layer
-    attention_weights = []
+    attn_store = {}
+
+    # Find the last self-attention module (Dinov2SelfAttention or similar)
+    last_attn_module = None
+    for name, mod in model.named_modules():
+        if hasattr(mod, "query") and hasattr(mod, "key") and hasattr(mod, "value"):
+            last_attn_module = (name, mod)
+
+    if last_attn_module is None:
+        raise RuntimeError("Could not find a self-attention layer with query/key/value in the model.")
+
+    attn_name, attn_mod = last_attn_module
+    num_heads = attn_mod.attention.num_attention_heads if hasattr(attn_mod, "attention") else model.config.num_attention_heads
 
     def hook_fn(module, input, output):
-        # output is (attn_output, attn_weights) when return_attn would be used
-        # But with HF transformers, we need to handle differently
-        pass
+        """Capture input to self-attention, compute attention weights manually."""
+        hidden_states = input[0]  # (B, N, C)
+        B, N, C = hidden_states.shape
 
-    # Use the model's built-in attention output
+        q = module.query(hidden_states)  # (B, N, C)
+        k = module.key(hidden_states)    # (B, N, C)
+
+        head_dim = C // num_heads
+        # Reshape to (B, num_heads, N, head_dim)
+        q = q.view(B, N, num_heads, head_dim).transpose(1, 2)
+        k = k.view(B, N, num_heads, head_dim).transpose(1, 2)
+
+        # Scaled dot-product attention
+        scale = head_dim ** -0.5
+        attn_weights = (q @ k.transpose(-2, -1)) * scale  # (B, heads, N, N)
+        attn_weights = attn_weights.softmax(dim=-1)
+
+        attn_store["attn"] = attn_weights.detach()
+
+    handle = attn_mod.register_forward_hook(hook_fn)
+
     with torch.no_grad():
-        outputs = model(img_tensor, output_attentions=True)
+        model(img_tensor)
 
-    # Get attention from last layer: shape (batch, num_heads, seq_len, seq_len)
-    last_attn = outputs.attentions[-1]  # (1, num_heads, N+1, N+1)
+    handle.remove()
+
+    if "attn" not in attn_store:
+        raise RuntimeError("Attention hook did not fire.")
+
+    # attn_store["attn"] shape: (1, num_heads, N+1, N+1)
+    last_attn = attn_store["attn"]
 
     # CLS token attention to all patch tokens (row 0, columns 1:)
     cls_attn = last_attn[0, :, 0, 1:]  # (num_heads, num_patches)
